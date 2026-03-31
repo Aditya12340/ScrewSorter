@@ -1,324 +1,138 @@
-# Cell 2: Imports + setup
-import os
 import cv2
-import json
-import math
-import shutil
-import random
 import numpy as np
 import matplotlib.pyplot as plt
 
-from PIL import Image
-from google.colab import files
+# ── CONFIG ────────────────────────────────────────────────────────────────────
+IMAGE_PATH = r"C:\Users\Navneet\Documents\ScrewSorter\IMG_0405.jpeg"  # change this
+QR_SIZE_MM  = 54.0    # printed QR size in mm (measure with ruler after printing)
+MIN_AREA    = 300     # ignore contours smaller than this
+# ─────────────────────────────────────────────────────────────────────────────
 
-import torch
-import torch.nn as nn
-from torch.utils.data import DataLoader
-from torchvision import datasets, transforms, models
+# ── LOAD IMAGE ────────────────────────────────────────────────────────────────
+img = cv2.imread(IMAGE_PATH)
+if img is None:
+    raise FileNotFoundError(f"Could not open image: {IMAGE_PATH}\nCheck the path is correct.")
 
-SEED = 42
-random.seed(SEED)
-np.random.seed(SEED)
-torch.manual_seed(SEED)
+img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+print(f"Image loaded: {img.shape[1]}x{img.shape[0]}px")
 
-DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-print("Using device:", DEVICE)
+# ── DETECT QR CODE ────────────────────────────────────────────────────────────
+detector = cv2.QRCodeDetector()
+data, points, _ = detector.detectAndDecode(img)
 
-# Cell 3: Upload exactly 3 base images (one per class)
-# After upload, you'll map each filename to class name.
+if points is None or len(points) == 0:
+    print("\nQR code NOT detected. Tips:")
+    print("  - Make sure the QR is fully in frame and not blurry")
+    print("  - Try better lighting, no glare")
+    print("  - Shoot from directly above")
+    raise SystemExit("Stopping — fix QR detection first.")
 
-uploaded = files.upload()
-print("Uploaded files:", list(uploaded.keys()))
+print(f"QR detected! Content: '{data}'")
 
+pts = points[0]  # 4 corner points, shape (4, 2)
 
-# Cell 4: Map uploaded files to your class names
-# IMPORTANT: edit this dictionary keys to match your uploaded filenames exactly.
+def dist(a, b):
+    return np.sqrt((a[0]-b[0])**2 + (a[1]-b[1])**2)
 
-# Example:
-# class_map = {
-#   "flat.jpg": "flat_head",
-#   "pan.jpg": "pan_head",
-#   "hex.jpg": "hex_head",
-# }
+sides_px   = [dist(pts[i], pts[(i+1)%4]) for i in range(4)]
+qr_size_px = np.mean(sides_px)
+mm_per_px  = QR_SIZE_MM / qr_size_px
 
-class_map = {
-     "Flat_Head_Screws.png": "Flat_Head",
-     "Oval_Head_Screw.jpg": "Oval_Head",
-     "Round_Washer_Head.jpg": "Round_Washer"
-}
+print(f"QR size in image : {qr_size_px:.1f} px")
+print(f"Scale            : {mm_per_px:.4f} mm/px")
 
-assert len(class_map) == 3, "Please map exactly 3 uploaded files to 3 class names."
-assert len(set(class_map.values())) == 3, "Class names must be 3 unique values."
+# ── FIND SCREW CONTOURS ───────────────────────────────────────────────────────
+gray    = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+blur    = cv2.GaussianBlur(gray, (5, 5), 0)
+edges   = cv2.Canny(blur, 30, 100)
+kernel  = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+edges_d = cv2.dilate(edges, kernel, iterations=1)
 
-print("Class map:")
-for k,v in class_map.items():
-    print(f"  {k} -> {v}")
+contours, _ = cv2.findContours(edges_d, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+qr_cx = np.mean(pts[:, 0])
+qr_cy = np.mean(pts[:, 1])
 
-# Cell 5: Build synthetic dataset from only 3 base images
+def near_qr(c):
+    M = cv2.moments(c)
+    if M["m00"] == 0:
+        return False
+    cx = M["m10"] / M["m00"]
+    cy = M["m01"] / M["m00"]
+    return dist((cx, cy), (qr_cx, qr_cy)) < qr_size_px * 0.7
 
-ROOT = "screw_data"
-TRAIN_DIR = os.path.join(ROOT, "train")
-VAL_DIR = os.path.join(ROOT, "val")
+big_contours = [
+    c for c in contours
+    if cv2.contourArea(c) > MIN_AREA and not near_qr(c)
+]
 
-# Clean old dataset
-if os.path.exists(ROOT):
-    shutil.rmtree(ROOT)
+# ── SHOW CANDIDATES ───────────────────────────────────────────────────────────
+vis = img_rgb.copy()
 
-classes = sorted(list(set(class_map.values())))
-for split in [TRAIN_DIR, VAL_DIR]:
-    for c in classes:
-        os.makedirs(os.path.join(split, c), exist_ok=True)
+# Draw QR outline
+cv2.polylines(vis, [pts.astype(int)], True, (80, 200, 120), 2)
+cv2.putText(vis, f"QR ({QR_SIZE_MM}mm)", (int(pts[0][0]), int(pts[0][1]) - 8),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.6, (80, 200, 120), 2)
 
-def augment_image(img_bgr, out_size=224):
-    """
-    img_bgr: numpy image
-    returns augmented BGR image (224x224)
-    """
-    h, w = img_bgr.shape[:2]
+# Draw candidate contours
+for i, c in enumerate(big_contours):
+    x, y, w, h = cv2.boundingRect(c)
+    cv2.rectangle(vis, (x, y), (x+w, y+h), (100, 160, 255), 2)
+    cv2.putText(vis, str(i), (x, y - 6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (100, 160, 255), 2)
 
-    # Random rotate
-    angle = random.uniform(-25, 25)
-    M = cv2.getRotationMatrix2D((w/2, h/2), angle, random.uniform(0.9, 1.1))
-    aug = cv2.warpAffine(img_bgr, M, (w, h), borderMode=cv2.BORDER_REFLECT101)
+plt.figure(figsize=(10, 8))
+plt.imshow(vis)
+plt.title("Green = QR (scale)     Blue = candidates\nClose this window then type the screw index in the terminal")
+plt.tight_layout()
+plt.show()  # window stays open until you close it
 
-    # Random crop-ish via scaling then resize back
-    scale = random.uniform(0.75, 1.0)
-    nh, nw = int(h*scale), int(w*scale)
-    y0 = random.randint(0, h - nh) if h - nh > 0 else 0
-    x0 = random.randint(0, w - nw) if w - nw > 0 else 0
-    aug = aug[y0:y0+nh, x0:x0+nw]
+# ── USER PICKS SCREW ──────────────────────────────────────────────────────────
+print("\nCandidate contours:")
+for i, c in enumerate(big_contours):
+    x, y, w, h = cv2.boundingRect(c)
+    print(f"  [{i}]  area={int(cv2.contourArea(c)):>6}  "
+          f"size={w}x{h}px  ~{max(w,h)*mm_per_px:.1f}mm long")
 
-    # Brightness/contrast
-    alpha = random.uniform(0.8, 1.25)  # contrast
-    beta = random.uniform(-25, 25)     # brightness
-    aug = cv2.convertScaleAbs(aug, alpha=alpha, beta=beta)
+screw_idx     = int(input("\nEnter index of the SCREW contour: "))
+screw_contour = big_contours[screw_idx]
 
-    # Slight blur sometimes
-    if random.random() < 0.3:
-        k = random.choice([3,5])
-        aug = cv2.GaussianBlur(aug, (k,k), 0)
+# ── MEASURE ───────────────────────────────────────────────────────────────────
+rect  = cv2.minAreaRect(screw_contour)
+(rx, ry), (rw, rh), angle = rect
 
-    # Random horizontal flip
-    if random.random() < 0.5:
-        aug = cv2.flip(aug, 1)
+shaft_length_mm = max(rw, rh) * mm_per_px
+shaft_width_mm  = min(rw, rh) * mm_per_px
 
-    aug = cv2.resize(aug, (out_size, out_size))
-    return aug
+# ── FINAL RESULT IMAGE ────────────────────────────────────────────────────────
+result = img_rgb.copy()
 
-# You can tune these:
-TRAIN_PER_CLASS = 100
-VAL_PER_CLASS = 5
+cv2.polylines(result, [pts.astype(int)], True, (80, 200, 120), 2)
+cv2.putText(result, f"QR = {QR_SIZE_MM}mm",
+            (int(pts[0][0]), int(pts[0][1]) - 8),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.55, (80, 200, 120), 2)
 
-for fname, cls in class_map.items():
-    base = cv2.imread(fname)
-    if base is None:
-        raise ValueError(f"Could not read uploaded file: {fname}")
+box_pts = cv2.boxPoints(rect).astype(int)
+cv2.drawContours(result, [box_pts], 0, (255, 120, 60), 2)
+cv2.putText(result, f"{shaft_length_mm:.1f} mm",
+            (int(rx) - 40, int(ry) - int(max(rw, rh) / 2) - 12),
+            cv2.FONT_HERSHEY_SIMPLEX, 0.75, (255, 120, 60), 2)
 
-    # Ensure reasonable base size
-    base = cv2.resize(base, (320, 320))
-
-    # Generate train
-    for i in range(TRAIN_PER_CLASS):
-        aug = augment_image(base, out_size=224)
-        cv2.imwrite(os.path.join(TRAIN_DIR, cls, f"{cls}_train_{i:04d}.jpg"), aug)
-
-    # Generate val
-    for i in range(VAL_PER_CLASS):
-        aug = augment_image(base, out_size=224)
-        cv2.imwrite(os.path.join(VAL_DIR, cls, f"{cls}_val_{i:04d}.jpg"), aug)
-
-print("Dataset created.")
-for split in [TRAIN_DIR, VAL_DIR]:
-    print("\n", split)
-    for c in classes:
-        n = len(os.listdir(os.path.join(split, c)))
-        print(f"  {c}: {n}")
-
-
-import glob
-
-def show_samples(split_dir, n=6):
-    paths = glob.glob(os.path.join(split_dir, "*", "*.jpg"))
-    picks = random.sample(paths, min(n, len(paths)))
-    plt.figure(figsize=(14, 4))
-    for i, p in enumerate(picks, 1):
-        img = cv2.cvtColor(cv2.imread(p), cv2.COLOR_BGR2RGB)
-        cls = p.split("/")[-2]
-        plt.subplot(1, len(picks), i)
-        plt.imshow(img)
-        plt.title(cls)
-        plt.axis("off")
-    plt.show()
-
-show_samples(TRAIN_DIR, n=6)
-#Training Set
-
-
-BATCH_SIZE = 32
-EPOCHS = 6
-LR = 1e-4
-
-train_tfms = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-])
-
-val_tfms = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-])
-
-train_ds = datasets.ImageFolder(TRAIN_DIR, transform=train_tfms)
-val_ds = datasets.ImageFolder(VAL_DIR, transform=val_tfms)
-
-train_loader = DataLoader(train_ds, batch_size=BATCH_SIZE, shuffle=True, num_workers=2)
-val_loader = DataLoader(val_ds, batch_size=BATCH_SIZE, shuffle=False, num_workers=2)
-
-print("class_to_idx:", train_ds.class_to_idx)
-
-model = models.mobilenet_v2(weights=models.MobileNet_V2_Weights.DEFAULT)
-model.classifier[1] = nn.Linear(model.last_channel, 3)
-model = model.to(DEVICE)
-
-criterion = nn.CrossEntropyLoss()
-optimizer = torch.optim.Adam(model.parameters(), lr=LR)
-
-best_val = 0.0
-for epoch in range(EPOCHS):
-    # train
-    model.train()
-    tr_loss = 0.0
-    for x, y in train_loader:
-        x, y = x.to(DEVICE), y.to(DEVICE)
-        optimizer.zero_grad()
-        out = model(x)
-        loss = criterion(out, y)
-        loss.backward()
-        optimizer.step()
-        tr_loss += loss.item()
-
-    # val
-    model.eval()
-    correct, total = 0, 0
-    with torch.no_grad():
-        for x, y in val_loader:
-            x, y = x.to(DEVICE), y.to(DEVICE)
-            out = model(x)
-            pred = out.argmax(1)
-            correct += (pred == y).sum().item()
-            total += y.size(0)
-
-    val_acc = correct / total
-    print(f"Epoch {epoch+1}/{EPOCHS} - train_loss: {tr_loss/len(train_loader):.4f} - val_acc: {val_acc:.4f}")
-
-    if val_acc > best_val:
-        best_val = val_acc
-        torch.save({
-            "model_state_dict": model.state_dict(),
-            "class_to_idx": train_ds.class_to_idx
-        }, "screw_classifier.pt")
-        print("  saved best -> screw_classifier.pt")
-
-print("Best val acc:", best_val)
-
-
-from PIL import Image
-
-ckpt = torch.load("screw_classifier.pt", map_location=DEVICE)
-idx_to_class = {v:k for k,v in ckpt["class_to_idx"].items()}
-
-infer_model = models.mobilenet_v2(weights=None)
-infer_model.classifier[1] = nn.Linear(infer_model.last_channel, 3)
-infer_model.load_state_dict(ckpt["model_state_dict"])
-infer_model.to(DEVICE).eval()
-
-infer_tfm = transforms.Compose([
-    transforms.Resize((224,224)),
-    transforms.ToTensor(),
-])
-
-print("Upload test image:")
-up = files.upload()
-test_name = next(iter(up.keys()))
-
-img = Image.open(test_name).convert("RGB")
-x = infer_tfm(img).unsqueeze(0).to(DEVICE)
-
-with torch.no_grad():
-    logits = infer_model(x)
-    probs = torch.softmax(logits, dim=1)[0].cpu().numpy()
-
-pred_idx = int(np.argmax(probs))
-print("Prediction:", idx_to_class[pred_idx])
-print("Confidence:", float(probs[pred_idx]))
-print("Probabilities:")
-for i, p in enumerate(probs):
-    print(f"  {idx_to_class[i]}: {p:.4f}")
-
-plt.figure(figsize=(4,4))
-plt.imshow(img)
-plt.title(f"Pred: {idx_to_class[pred_idx]} ({probs[pred_idx]:.2f})")
+plt.figure(figsize=(10, 8))
+plt.imshow(result)
+plt.title(f"Length: {shaft_length_mm:.1f} mm  |  "
+          f"Diameter: {shaft_width_mm:.1f} mm  |  "
+          f"Scale: {mm_per_px:.4f} mm/px")
 plt.axis("off")
+plt.tight_layout()
 plt.show()
 
-
-files.download("screw_classifier.pt")
-
-
-###  Length Estimator - needs major work
-
-import cv2
-import numpy as np
-from IPython.display import display
-import ipywidgets as widgets
-from PIL import Image
-import io
-
-uploader = widgets.FileUpload(accept='image/*', multiple=False)
-display(uploader)
-
-def process_image(change):
-
-    if len(uploader.value) == 0:
-        return
-
-    uploaded_file = list(uploader.value.values())[0]
-    content = uploaded_file['content']
-
-    image = Image.open(io.BytesIO(content))
-    img = cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
-
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 150)
-
-    contours, _ = cv2.findContours(edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-
-    scale = 0.192  # mm per pixel
-
-    for c in contours:
-
-        if cv2.contourArea(c) < 100:
-            continue
-
-        x, y, w, h = cv2.boundingRect(c)
-
-        pixel_length = max(w, h)
-        real_length = pixel_length * scale
-
-        cv2.rectangle(img, (x,y), (x+w,y+h), (0,255,0), 2)
-
-        label = f"{real_length:.2f} mm"
-
-        cv2.putText(img, label, (x, y-10),
-                    cv2.FONT_HERSHEY_SIMPLEX,
-                    0.6, (0,255,0), 2)
-
-        print("Measured length:", real_length, "mm")
-
-    from matplotlib import pyplot as plt
-    plt.imshow(cv2.cvtColor(img, cv2.COLOR_BGR2RGB))
-    plt.axis("off")
-    plt.show()
-
-uploader.observe(process_image, names='value')
+# ── PRINT SUMMARY ─────────────────────────────────────────────────────────────
+print("\n" + "="*45)
+print("  MEASUREMENT RESULTS")
+print("="*45)
+print(f"  Scale          : {mm_per_px:.4f} mm/px")
+print(f"  Shaft length   : {shaft_length_mm:.1f} mm")
+print(f"  Shaft diameter : {shaft_width_mm:.1f} mm")
+print(f"  Screw angle    : {angle:.1f} degrees")
+print("="*45)
