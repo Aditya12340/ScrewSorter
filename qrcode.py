@@ -1,12 +1,12 @@
 import cv2
 import numpy as np
+import matplotlib
+matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-IMAGE_PATH   = r"C:\Users\Navneet\Downloads\IMG_0417.jpeg"
-QR_SIZE_MM   = 50.8    # measure your printed QR with a ruler and set this
-DARK_ON_LIGHT = True   # True = dark screw on white/light background (your setup)
-                       # False = light screw on dark background
+IMAGE_PATH  = r"C:\Users\Navneet\Downloads\IMG_0433.jpeg"
+QR_SIZE_MM  = 50.8    # measure your printed QR with a ruler
 # ─────────────────────────────────────────────────────────────────────────────
 
 img = cv2.imread(IMAGE_PATH)
@@ -17,13 +17,21 @@ img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
 H, W = img.shape[:2]
 print(f"Image loaded: {W}x{H}px")
 
+
 # ── DETECT QR ─────────────────────────────────────────────────────────────────
+# Downscale first — helps QR detector on high-res phone images
+scale_factor = min(1.0, 1500 / max(img.shape[:2]))
+small = cv2.resize(img, (0, 0), fx=scale_factor, fy=scale_factor)
+
 detector = cv2.QRCodeDetector()
-data, points, _ = detector.detectAndDecode(img)
+data, points, _ = detector.detectAndDecode(small)
 
 if points is None:
     print("QR not detected — make sure QR is fully visible and in focus.")
     raise SystemExit()
+
+# Scale points back up to original image coordinates
+points = points / scale_factor
 
 pts        = points[0]
 sides_px   = [np.linalg.norm(pts[i] - pts[(i+1)%4]) for i in range(4)]
@@ -35,17 +43,28 @@ qr_cy      = np.mean(pts[:, 1])
 print(f"QR detected: '{data}'")
 print(f"Scale: {mm_per_px:.4f} mm/px")
 
-# ── FIND SCREW VIA THRESHOLD ──────────────────────────────────────────────────
-# Simple threshold works well for dark screw on white paper background
-gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+# ── BACKGROUND REMOVAL (works for ANY screw color on white paper) ─────────────
+# Step 1: Convert to LAB color space — better at separating light/dark
+lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+l_channel = lab[:, :, 0]  # L = lightness
 
-if DARK_ON_LIGHT:
-    _, thresh = cv2.threshold(gray, 100, 255, cv2.THRESH_BINARY_INV)
-else:
-    _, thresh = cv2.threshold(gray, 150, 255, cv2.THRESH_BINARY)
+# Step 2: Automatically find the white background level
+# White paper will be the brightest region — use the 90th percentile as reference
+white_level = np.percentile(l_channel, 90)
+
+# Step 3: Anything significantly darker than the white background is an object
+# This adapts automatically regardless of screw color
+threshold_level = white_level * 0.80  # 80% of white = cutoff
+_, thresh = cv2.threshold(l_channel, threshold_level, 255, cv2.THRESH_BINARY_INV)
+
+# Step 4: Clean up noise with morphology
+kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+thresh = cv2.morphologyEx(thresh, cv2.MORPH_CLOSE, kernel, iterations=2)
+thresh = cv2.morphologyEx(thresh, cv2.MORPH_OPEN,  kernel, iterations=1)
 
 contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
 
+# ── FIND SCREW ────────────────────────────────────────────────────────────────
 best_score   = -1
 best_contour = None
 best_rect    = None
@@ -58,12 +77,13 @@ for c in contours:
     if cv2.contourArea(c) < 500:
         continue
 
-    # Skip anything near the QR code
     M = cv2.moments(c)
     if M["m00"] == 0:
         continue
     cx = M["m10"] / M["m00"]
     cy = M["m01"] / M["m00"]
+
+    # Skip contours near the QR code
     if np.sqrt((cx - qr_cx)**2 + (cy - qr_cy)**2) < qr_size_px * 0.8:
         continue
 
@@ -90,9 +110,10 @@ for c in contours:
 
 if best_contour is None:
     print("\nCould not detect screw. Tips:")
-    print("  - Use a plain white or black background")
-    print("  - Make sure screw contrasts clearly with background")
+    print("  - Use a plain WHITE background (paper works great)")
+    print("  - Avoid shadows across the screw")
     print("  - Shoot from directly above")
+    print("  - Make sure the whole screw is in frame")
     raise SystemExit()
 
 # ── MEASURE ───────────────────────────────────────────────────────────────────
@@ -119,7 +140,8 @@ plt.imshow(result)
 plt.title(f"Length: {shaft_length_mm:.1f} mm  |  Diameter: {shaft_width_mm:.1f} mm")
 plt.axis("off")
 plt.tight_layout()
-plt.show()
+plt.savefig(r"C:\Users\Navneet\Documents\ScrewSorter\result.png", dpi=150, bbox_inches='tight')
+print("Result saved to result.png")
 
 print("\n" + "="*45)
 print("  MEASUREMENT RESULTS")
