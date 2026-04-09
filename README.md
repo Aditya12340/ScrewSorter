@@ -143,6 +143,13 @@ ScrewSorter/
 
 ---
 
+## Contributors
+
+This project was developed by the Praxis II team:
+- **Team Members:** Aditya Jain, Eva Deochakke, Jocelyn Li, Navneet Saxena, Peyton Smith
+
+---
+
 ## License
 
 This project is licensed under the terms of the [LICENSE](LICENSE) file included in this repository.
