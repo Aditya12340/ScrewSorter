@@ -3,34 +3,35 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import cv2
 import numpy as np
-import torch
-import torch.nn as nn
-from torchvision import models, transforms
+import time
+import os
 from PIL import Image
+from google import genai
+from google.api_core import exceptions
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 
 # ── CONFIG ────────────────────────────────────────────────────────────────────
-CAMERA_INDEX    = 1
-QR_SIZE_MM      = 21.9     # measure your printed QR outer edge to outer edge in mm
-CLASSIFIER_PATH = r"C:\Users\Navneet\Documents\ScrewSorter\screw_classifier.pt"
-SAVE_PATH       = r"C:\Users\Navneet\Documents\ScrewSorter\result.png"
+CAMERA_INDEX   = 1
+QR_SIZE_MM     = 21.9  
+GEMINI_API_KEY = os.environ.get('GEMINI_API_KEY')
+if not GEMINI_API_KEY:
+    print("Error: GEMINI_API_KEY environment variable not set.")
+    exit(1)
+SAVE_PATH      = r"C:\Users\Navneet\Documents\ScrewSorter\result.png"
+MODEL_ID = "gemini-2.5-flash"
 # ─────────────────────────────────────────────────────────────────────────────
 
-# ── LOAD CLASSIFIER ───────────────────────────────────────────────────────────
-print("Loading head shape classifier...")
-ckpt         = torch.load(CLASSIFIER_PATH, map_location="cpu")
-idx_to_class = {v: k for k, v in ckpt["class_to_idx"].items()}
-
-classifier = models.mobilenet_v2(weights=None)
-classifier.classifier[1] = nn.Linear(classifier.last_channel, len(idx_to_class))
-classifier.load_state_dict(ckpt["model_state_dict"])
-classifier.eval()
-
-infer_tfm = transforms.Compose([
-    transforms.Resize((224, 224)),
-    transforms.ToTensor(),
-])
-print(f"Classifier ready. Classes: {list(idx_to_class.values())}\n")
-
+# ── LOAD GEMINI (New SDK) ─────────────────────────────────────────────────────
+print("Connecting to Gemini...")
+try:
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    print("Gemini ready.\n")
+except Exception as e:
+    print(f"Failed to connect: {e}")
+    exit()
 
 # ── QR DETECTION ──────────────────────────────────────────────────────────────
 def detect_qr(img):
@@ -44,7 +45,6 @@ def detect_qr(img):
     if points is not None:
         return data, points / scale
     return None, None
-
 
 # ── LENGTH MEASUREMENT ────────────────────────────────────────────────────────
 def measure_length(img):
@@ -162,107 +162,104 @@ def measure_length(img):
 
     return shaft_length_mm, shaft_width_mm, pts, best_rect_full
 
-
-# ── HEAD SHAPE CLASSIFICATION ─────────────────────────────────────────────────
-def classify_head(img):
+# ── HEAD SHAPE CLASSIFICATION (With Rate Limit Handling) ─────────────────────
+def classify_head(img, retries=3):
     img_rgb = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
     pil_img = Image.fromarray(img_rgb)
-    tensor  = infer_tfm(pil_img).unsqueeze(0)
-    with torch.no_grad():
-        logits = classifier(tensor)
-        probs  = torch.softmax(logits, dim=1)[0].numpy()
-    pred_idx   = int(np.argmax(probs))
-    return idx_to_class[pred_idx], float(probs[pred_idx]), probs
 
+    prompt = """Identify the screw head type. Reply ONLY with one:
+Flat_Head, Oval_Head, Round_Washer."""
+
+    for attempt in range(retries):
+        try:
+            response = client.models.generate_content(
+                model=MODEL_ID,
+                contents=[prompt, pil_img]
+            )
+            return response.text.strip().replace(".", "").split()[0]
+        except Exception as e:
+            if "429" in str(e) and attempt < retries - 1:
+                print(f"   Quota hit. Retrying in 5s... (Attempt {attempt+1}/{retries})")
+                time.sleep(5)
+            else:
+                raise e
+    return "Unknown"
 
 # ── PROCESS FRAME ─────────────────────────────────────────────────────────────
 def process(frame):
     print("\nRunning length measurement...")
     shaft_length_mm, shaft_width_mm, qr_pts, best_rect = measure_length(frame)
 
-    print("Running head shape classifier...")
-    head_type, confidence, probs = classify_head(frame)
+    print("Running head shape classification (Gemini)...")
+    try:
+        head_type = classify_head(frame)
+    except Exception as e:
+        print(f"   Gemini error: {e}")
+        head_type = "Unknown"
 
     print("\n" + "=" * 45)
-    print("  SCREW SORTER RESULTS")
+    print("   SCREW SORTER RESULTS")
     print("=" * 45)
     if shaft_length_mm is not None:
-        print(f"  Shaft length   : {shaft_length_mm:.1f} mm  ({shaft_length_mm/25.4:.2f} inches)")
-        print(f"  Shaft diameter : {shaft_width_mm:.1f} mm")
+        print(f"   Shaft length   : {shaft_length_mm:.1f} mm  ({shaft_length_mm/25.4:.2f} inches)")
+        print(f"   Shaft diameter : {shaft_width_mm:.1f} mm")
     else:
-        print("  Shaft length   : Could not measure")
-    print(f"  Head type      : {head_type}")
-    print(f"  Confidence     : {confidence*100:.1f}%")
-    print("\n  All probabilities:")
-    for i, p in enumerate(probs):
-        bar = "█" * int(p * 20)
-        print(f"    {idx_to_class[i]:<20} {p*100:5.1f}%  {bar}")
+        print("   Shaft length   : Could not measure")
+    print(f"   Head type      : {head_type}")
     print("=" * 45)
 
-    # Annotate and save
     result_img = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+
     if qr_pts is not None:
         cv2.polylines(result_img, [qr_pts.astype(int)], True, (80, 200, 120), 3)
+
     if best_rect is not None:
         (rx, ry), (rw, rh), angle = best_rect
         box_pts = cv2.boxPoints(best_rect).astype(int)
         cv2.drawContours(result_img, [box_pts], 0, (255, 120, 60), 3)
         if shaft_length_mm:
             cv2.putText(result_img, f"{shaft_length_mm:.1f}mm",
-                        (int(rx) - 50, int(ry) - int(max(rw, rh) / 2) - 15),
+                        (int(rx) - 50, int(ry) - 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.0, (255, 120, 60), 2)
-    cv2.putText(result_img, f"{head_type} ({confidence*100:.0f}%)",
-                (20, 40), cv2.FONT_HERSHEY_SIMPLEX, 1.0, (100, 160, 255), 2)
+
+    cv2.putText(result_img, head_type, (20, 40), 
+                cv2.FONT_HERSHEY_SIMPLEX, 1.0, (100, 160, 255), 2)
 
     plt.figure(figsize=(10, 8))
     plt.imshow(result_img)
-    title = f"Head: {head_type} ({confidence*100:.0f}%)"
-    if shaft_length_mm:
-        title += f"   |   Length: {shaft_length_mm:.1f} mm"
-    plt.title(title)
+    plt.title(f"Head: {head_type} | Length: {shaft_length_mm:.1f} mm" if shaft_length_mm else f"Head: {head_type}")
     plt.axis("off")
     plt.tight_layout()
     plt.savefig(SAVE_PATH, dpi=150, bbox_inches='tight')
     plt.close()
-    print(f"\nResult saved → {SAVE_PATH}")
-    print("Ready for next screw — press SPACE again.\n")
-
+    print(f"\nResult saved → {SAVE_PATH}\nReady for next screw.\n")
 
 # ── MAIN LOOP ─────────────────────────────────────────────────────────────────
 print("=" * 45)
-print("  SCREW SORTER")
+print("   SCREW SORTER")
 print("=" * 45)
-print(f"Opening camera {CAMERA_INDEX}...")
 
 cap = cv2.VideoCapture(CAMERA_INDEX)
 if not cap.isOpened():
     print(f"Could not open camera {CAMERA_INDEX}.")
-    print("Try changing CAMERA_INDEX to 0 or 2 at the top of the file.")
     raise SystemExit()
 
 cap.set(cv2.CAP_PROP_FRAME_WIDTH,  1280)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
 
-print("Camera ready!")
-print("Place screw next to the QR sheet.")
-print("Press SPACEBAR to capture and measure.")
-print("Press Q to quit.\n")
+print("Camera ready! Press SPACEBAR to capture, Q to quit.\n")
 
 while True:
     ret, frame = cap.read()
-    if not ret:
-        print("Camera read failed — check connection.")
-        break
+    if not ret: break
 
     preview = cv2.resize(frame, (800, 600))
-    cv2.putText(preview, "SPACE = capture    Q = quit",
-                (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
+    cv2.putText(preview, "SPACE = capture    Q = quit", (10, 30), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 200, 255), 2)
     cv2.imshow("Screw Sorter", preview)
 
     key = cv2.waitKey(1) & 0xFF
-    if key == ord('q'):
-        print("Quitting.")
-        break
+    if key == ord('q'): break
     elif key == ord(' '):
         print("Capturing...")
         process(frame)

@@ -1,6 +1,6 @@
 
 > **Praxis II — Automated Screw Sorting with Computer Vision & AI**
-ScrewSorter is a computer-vision pipeline that automatically **identifies screw head types** and **estimates screw lengths** from images. It was built for the Praxis II engineering design course and offers two classification approaches: a custom-trained deep-learning model (MobileNetV2) and a Google Gemini AI wrapper — so you can pick the method that fits your workflow.
+ScrewSorter is a computer-vision pipeline that automatically **identifies screw head types** and **estimates screw lengths** from images using Google Gemini AI and OpenCV. It was built for the Praxis II engineering design course and provides real-time screw analysis through a camera interface.
 
 ---
 
@@ -8,13 +8,9 @@ ScrewSorter is a computer-vision pipeline that automatically **identifies screw 
 
 - [Features](#features)
 - [How It Works](#how-it-works)
-  - [Approach 1 — Custom CNN Classifier (`main.py`)](#approach-1--custom-cnn-classifier-mainpy)
-  - [Approach 2 — Gemini AI Wrapper (`ScrewClassifierAIWrapper.ipynb`)](#approach-2--gemini-ai-wrapper-screwclassifieraiwrapperipynb)
 - [Supported Screw Head Types](#supported-screw-head-types)
 - [Prerequisites](#prerequisites)
 - [Getting Started](#getting-started)
-  - [Running the CNN Classifier on Google Colab](#running-the-cnn-classifier-on-google-colab)
-  - [Running the Gemini AI Wrapper on Google Colab](#running-the-gemini-ai-wrapper-on-google-colab)
 - [Configuration](#configuration)
 - [Project Structure](#project-structure)
 - [Limitations & Future Work](#limitations--future-work)
@@ -24,42 +20,31 @@ ScrewSorter is a computer-vision pipeline that automatically **identifies screw 
 
 ## Features
 
-- 🔩 **Three-class screw head classification** — Flat Head, Oval Head, Round Washer Head
-- 🤖 **Two interchangeable classifiers** — a fine-tuned MobileNetV2 CNN and a Google Gemini vision model
-- 🖼️ **Few-shot synthetic dataset generation** — trains a production-ready model from as few as **3 seed images** using aggressive on-the-fly augmentation
-- 📏 **Screw length estimator** — uses OpenCV edge detection and contour analysis to measure physical length in millimetres directly from an image
-- ☁️ **Runs entirely on Google Colab** — no local GPU required
+- 🔩 **Three-class screw head classification** — Flat Head, Oval Head, Round Washer Head using Google Gemini AI
+- 🤖 **AI-powered classification** — Zero-shot screw head identification with Google's Gemini vision model
+- 📏 **Screw length estimator** — Uses OpenCV contour analysis and QR code calibration to measure physical length in millimetres
+- 📷 **Real-time camera interface** — Live video feed with capture functionality
+- 🔒 **Secure API key management** — Environment variables with .env file support
+- 💾 **Result visualization** — Saves annotated images with measurements and classifications
 
 ---
 
 ## How It Works
 
-### Approach 1 — Custom CNN Classifier (`main.py`)
-
 ```
-3 seed images  ──►  Augmentation  ──►  Synthetic dataset
-                                          │
-                                    MobileNetV2 (fine-tuned)
-                                          │
-                               Classification + confidence
-                                          │
-                               Optional: Length Estimator
+Camera feed  ──►  QR detection (scale calibration)  ──►  Screw contour analysis
+                        │                                       │
+                        ▼                                       ▼
+                 Physical measurements (mm)          Head shape classification
+                        │                                       │
+                        └───────────────────►  Gemini AI analysis  ──►  Results
 ```
 
-1. **Upload 3 seed images** (one per class) via the Colab file picker.
-2. **Synthetic dataset creation** — each seed image is augmented 100× for training and 5× for validation using random rotation (±25°), random crop, brightness/contrast jitter, Gaussian blur, and horizontal flip. All images are resized to 224 × 224 px.
-3. **Model training** — a pretrained MobileNetV2 backbone (ImageNet weights) is fine-tuned with a new 3-class head using the Adam optimiser and CrossEntropyLoss for 6 epochs (batch size 32, LR 1e-4).
-4. **Inference** — upload any screw image and receive the predicted class together with class probabilities.
-5. **Length estimation** — a separate OpenCV widget detects screw contours via Canny edge detection, fits a bounding rectangle, and converts the largest dimension to millimetres using a calibrated scale factor (default: `0.192 mm/pixel`).
-6. **Model export** — the best checkpoint (`screw_classifier.pt`) is automatically downloaded to your local machine.
-
-### Approach 2 — Gemini AI Wrapper (`ScrewClassifierAIWrapper.ipynb`)
-
-```
-Screw image  ──►  Google Gemini Flash (vision LLM)  ──►  Head type label
-```
-
-Uses the `gemini-flash-latest` multimodal model as a zero-shot mechanical-fastener expert. Upload any screw image and the model returns exactly one of: **Round Head**, **Oval Head**, or **Flat Head** — no training required.
+1. **QR Code Detection** — Detects a QR code in the image to establish a scale reference (calibrated to known size)
+2. **Screw Detection** — Uses OpenCV thresholding and contour analysis to identify screw shapes in the image
+3. **Length Measurement** — Calculates screw shaft length using the QR scale and fitted bounding rectangles
+4. **Head Classification** — Sends the image to Google Gemini AI with a prompt to identify the screw head type
+5. **Result Display** — Shows measurements, classification, and saves an annotated image
 
 ---
 
@@ -67,95 +52,69 @@ Uses the `gemini-flash-latest` multimodal model as a zero-shot mechanical-fasten
 
 | Class | Description |
 |---|---|
-| **Flat Head** | Countersunk head that sits flush with the surface |
-| **Oval Head** | Partially countersunk with a rounded, decorative top |
-| **Round Washer Head** | Dome-shaped head with a built-in washer bearing surface |
+| **Flat_Head** | Countersunk head that sits flush with the surface |
+| **Oval_Head** | Partially countersunk with a rounded, decorative top |
+| **Round_Washer** | Dome-shaped head with a built-in washer bearing surface |
 
 ---
 
 ## Prerequisites
 
-### CNN Classifier (`main.py`)
 | Package | Purpose |
 |---|---|
-| `torch` / `torchvision` | Model training & inference |
-| `opencv-python` (`cv2`) | Image augmentation & length estimation |
-| `Pillow` | Image I/O |
+| `google-generativeai` | Gemini AI API client |
+| `opencv-python` | Image processing and computer vision |
+| `Pillow` | Image I/O and manipulation |
 | `numpy` | Numerical operations |
-| `matplotlib` | Visualisation |
-| `google-colab` | File upload/download helpers (Colab built-in) |
+| `matplotlib` | Result visualization |
+| `python-dotenv` | Environment variable loading |
 
-### Gemini AI Wrapper (`ScrewClassifierAIWrapper.ipynb`)
-| Package | Purpose |
-|---|---|
-| `google-generativeai` | Gemini API client (installed automatically in the notebook) |
-| `Pillow` | Image loading |
-| `google-colab` | File upload helpers (Colab built-in) |
+> Install all dependencies in a virtual environment: `pip install google-generativeai opencv-python Pillow numpy matplotlib python-dotenv`
 
-> All packages except `google-generativeai` are pre-installed in the standard Google Colab runtime.
 ---
 
 ## Getting Started
 
-### Running the CNN Classifier on Google Colab
+1. **Clone or download the repository**
 
-1. **Open `main.py` in Colab**
-
-   Because `main.py` is a plain Python script (not a notebook), open a new Colab session, upload `main.py` via the file panel, and run it with:
-   ```python
-   %run main.py
-   ```
-   Alternatively, copy-paste the cells sequentially into a new Colab notebook.
-
-2. **Upload your 3 seed images** when prompted. One image per screw head class.
-
-3. **Update the `class_map` dictionary** to match your uploaded filenames:
-
-   ```python
-   class_map = {
-       "Flat_Head_Screws.png": "Flat_Head",
-       "Oval_Head_Screw.jpg":  "Oval_Head",
-       "Round_Washer_Head.jpg": "Round_Washer"
-   }
+2. **Set up a Python virtual environment:**
+   ```bash
+   python -m venv .venv
+   .venv\Scripts\activate  # On Windows
+   pip install google-generativeai opencv-python Pillow numpy matplotlib python-dotenv
    ```
 
-4. **Run all cells** — the script will:
-   - Generate the synthetic dataset
-   - Train the model (≈ 2–5 minutes on a free Colab GPU)
-   - Print per-epoch training loss and validation accuracy
-   - Save and download `screw_classifier.pt`
+3. **Get a Google Gemini API key:**
+   - Visit [Google AI Studio](https://aistudio.google.com/)
+   - Create a new API key
 
-5. **Test inference** — upload a new screw image when prompted to see the prediction and confidence scores.
+4. **Configure the API key:**
+   - Create a `.env` file in the project root
+   - Add your API key: `GEMINI_API_KEY=your_api_key_here`
 
-6. **Optional — Length Estimator** — the final section renders an interactive file-upload widget. Upload a screw image to get the estimated length in mm overlaid on the image.
+5. **Run the application:**
+   ```bash
+   python mains.py
+   ```
 
-### Running the Gemini AI Wrapper on Google Colab
-
-1. **Store your Gemini API key** as a Colab secret named `ScrewClassifier`:
-   - Open *Runtime → Manage secrets* and add the key.
-   - The notebook reads it via `userdata.get("ScrewClassifier")`.
-
-2. **Open and run the notebook**
-
-   [![Open In Colab](https://colab.research.google.com/assets/colab-badge.svg)](https://colab.research.google.com/github/Aditya12340/ScrewSorter/blob/main/ScrewClassifierAIWrapper.ipynb)
-
-3. **Upload a screw image** when prompted — the identified head type is printed to the console.
+6. **Usage:**
+   - Place a screw next to a QR code sheet for scale reference
+   - Press SPACEBAR to capture and analyze
+   - Press Q to quit
+   - Results are displayed in the console and saved as `result.png`
 
 ---
 
 ## Configuration
 
-The following constants at the top of `main.py` can be tuned without changing any other code:
+The following constants at the top of `mains.py` can be tuned:
 
 | Constant | Default | Description |
 |---|---|---|
-| `SEED` | `42` | Global random seed for reproducibility |
-| `TRAIN_PER_CLASS` | `100` | Augmented training images generated per class |
-| `VAL_PER_CLASS` | `5` | Augmented validation images generated per class |
-| `BATCH_SIZE` | `32` | Mini-batch size during training |
-| `EPOCHS` | `6` | Number of training epochs |
-| `LR` | `1e-4` | Adam learning rate |
-| `scale` (length estimator) | `0.192` | Millimetres per pixel — calibrate to your camera/setup |
+| `CAMERA_INDEX` | `1` | Camera device index (0 for default webcam) |
+| `QR_SIZE_MM` | `21.9` | Physical size of QR code in mm for calibration |
+| `SAVE_PATH` | `result.png` | Path to save the annotated result image |
+| `MODEL_ID` | `gemini-2.5-flash` | Gemini model to use for classification |
 
 ---
 
@@ -163,35 +122,24 @@ The following constants at the top of `main.py` can be tuned without changing an
 
 ```
 ScrewSorter/
-├── main.py                        # CNN training, inference & length estimator (Colab script)
-├── ScrewClassifierAIWrapper.ipynb # Gemini AI-powered classifier (Colab notebook)
-├── LICENSE
-└── README.md
-```
-
-**Generated at runtime (not committed):**
-
-```
-screw_data/
-├── train/
-│   ├── Flat_Head/     (100 augmented images)
-│   ├── Oval_Head/     (100 augmented images)
-│   └── Round_Washer/  (100 augmented images)
-└── val/
-    ├── Flat_Head/     (5 augmented images)
-    ├── Oval_Head/     (5 augmented images)
-    └── Round_Washer/  (5 augmented images)
-screw_classifier.pt                # Best model checkpoint
+├── mains.py                 # Main application script
+├── .env                     # Environment variables (API key)
+├── .gitignore              # Git ignore rules
+├── README.md               # This file
+├── LICENSE                 # License information
+├── demo.py                 # Demo/test script
+└── Older-Backup Files/     # Archived files
 ```
 
 ---
 
 ## Limitations & Future Work
 
-- **Length estimator calibration** — the `scale` factor (`0.192 mm/pixel`) assumes a fixed camera distance and sensor. For accurate measurements, calibrate against a known reference object in the same image plane.
-- **Small validation set** — with only 5 augmented validation images per class (all derived from a single seed), validation accuracy is a rough guide rather than a statistically robust metric. Expanding to real diverse images would improve reliability.
-- **Three classes only** — the current model is hard-coded for three screw head types. Adding new classes requires re-uploading seed images and retraining.
-- **Colab dependency** — `main.py` uses `google.colab.files` for uploads/downloads and is therefore tied to the Colab environment. Refactoring to accept local file paths would enable standalone execution.
+- **Camera calibration** — The QR size (`QR_SIZE_MM`) needs to be measured accurately for precise measurements
+- **Lighting conditions** — Performance may vary with different lighting; optimal results with even, bright lighting
+- **Screw orientation** — Best results when screws are positioned with heads clearly visible
+- **API rate limits** — Gemini API has usage limits; includes retry logic for quota exceeded errors
+- **Real-time performance** — Processing time depends on image complexity and API response time
 
 ---
 
