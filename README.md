@@ -94,7 +94,7 @@ Camera feed  ──►  QR detection (scale calibration)  ──►  Screw conto
 
 5. **Run the application:**
    ```bash
-   python mains.py
+   python main.py
    ```
 
 6. **Usage:**
@@ -107,7 +107,7 @@ Camera feed  ──►  QR detection (scale calibration)  ──►  Screw conto
 
 ## Configuration
 
-The following constants at the top of `mains.py` can be tuned:
+The following constants at the top of `main.py` can be tuned:
 
 | Constant | Default | Description |
 |---|---|---|
@@ -122,7 +122,7 @@ The following constants at the top of `mains.py` can be tuned:
 
 ```
 ScrewSorter/
-├── mains.py                 # Main application script
+├── main.py                 # Main application script
 ├── .env                     # Environment variables (API key)
 ├── .gitignore              # Git ignore rules
 ├── README.md               # This file
